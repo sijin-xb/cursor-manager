@@ -9,7 +9,9 @@ mod online;
 mod preview;
 mod themes;
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -19,7 +21,6 @@ use gpui_kit::RenderImage;
 use gpui_kit::assets::Assets;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::{ActiveTheme, Selectable, Sizable, Theme, ThemeMode, label::Label};
 
 actions!(cursor_manager, [SelUp, SelDown, ApplySel, DelSel]);
@@ -76,8 +77,10 @@ struct CursorManagerApp {
     pending_uninstall: bool,
     /// 本地列表排序：false = 名称，true = 修改时间（新→旧）
     sort_by_time: bool,
-    /// 自定义尺寸滑杆（8–128，预设外任意值）
-    size_slider: Option<Entity<SliderState>>,
+    /// M3 波浪滑杆状态：拖动中标志 / 当前波幅 / 相位
+    wavy_drag: Rc<Cell<bool>>,
+    wavy_amp: f32,
+    wavy_phase: f32,
     /// false = 本地列表，true = 在线目录
     view_mode: bool,
     search: Option<Entity<InputState>>,
@@ -125,7 +128,9 @@ impl CursorManagerApp {
             status: "就绪 —— 左侧选择主题，右下应用".into(),
             pending_uninstall: false,
             sort_by_time: false,
-            size_slider: None,
+            wavy_drag: Rc::new(Cell::new(false)),
+            wavy_amp: 0.0,
+            wavy_phase: 0.0,
             view_mode: false,
             search: None,
             online_assets: None,
@@ -157,6 +162,14 @@ impl CursorManagerApp {
                 let mut animated = false;
                 let alive = this
                     .update(cx, |s, cx| {
+                        // M3 波浪：拖动时波幅增大 + 相位滑动；静止衰减到细波并停更
+                        let target = if s.wavy_drag.get() { 3.2 } else { 1.1 };
+                        s.wavy_amp += (target - s.wavy_amp) * 0.3;
+                        if s.wavy_drag.get() {
+                            s.wavy_phase += 0.5;
+                        }
+                        let animating = s.wavy_drag.get()
+                            || (s.wavy_amp - target).abs() > 0.03;
                         for i in 0..s.previews.len() {
                             let Some(a) = &s.previews[i] else { continue };
                             if a.frames.len() < 2 {
@@ -176,7 +189,7 @@ impl CursorManagerApp {
                             s.anim_budget_ms[i] = budget;
                             s.anim_idx[i] = idx;
                         }
-                        if animated {
+                        if animated || animating {
                             cx.notify();
                         }
                     })
@@ -235,37 +248,20 @@ impl CursorManagerApp {
         self.preview_key = Some(key);
     }
 
-    /// 创建尺寸滑杆并订阅事件（需要 window 才能设初值）
-    fn init_slider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let e = cx.new(|_| SliderState::new().min(8.).max(128.));
-        e.update(cx, |st, c| {
-            st.set_value(SliderValue::Single(self.size as f32), window, c);
-        });
-        cx.subscribe(&e, |this, _, evt: &SliderEvent, cx| {
-            this.on_slider_event(evt, cx);
-        })
-        .detach();
-        self.size_slider = Some(e);
-    }
-
-    fn on_slider_event(&mut self, event: &SliderEvent, cx: &mut Context<Self>) {
-        let v = match event {
-            SliderEvent::Change(v) | SliderEvent::Release(v) => v,
-        };
-        let f = match v {
-            SliderValue::Single(f) => *f,
-            SliderValue::Range(a, _) => *a,
-        };
-        let n = f.round().clamp(8.0, 128.0) as u32;
+    /// 拖动中设置波浪滑杆值（frac ∈ [0,1] → 尺寸 8–128）
+    fn set_wavy_frac(&mut self, frac: f32, cx: &mut Context<Self>) {
+        let n = (8.0 + frac * 120.0).round().clamp(8.0, 128.0) as u32;
         if n != self.size {
             self.size = n;
-            // 拖动中只更新数值；松手才重解码预览
-            if matches!(event, SliderEvent::Release(_)) {
-                self.preview_key = None;
-                self.refresh_previews();
-            }
             cx.notify();
         }
+    }
+
+    /// 松手：按最终尺寸重解码预览
+    fn release_wavy(&mut self, cx: &mut Context<Self>) {
+        self.preview_key = None;
+        self.refresh_previews();
+        cx.notify();
     }
 
     /// 统一的选中入口：行点击 / 键盘导航都走这里
@@ -1224,17 +1220,8 @@ impl Render for CursorManagerApp {
                         let mut b = Button::new(SharedString::from(format!("size-{s}")))
                             .small()
                             .label(format!("{s}"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .on_click(cx.listener(move |this, _, _, cx| {
                                 this.size = s;
-                                if let Some(e) = &this.size_slider {
-                                    e.update(cx, |st, c| {
-                                        st.set_value(
-                                            SliderValue::Single(s as f32),
-                                            window,
-                                            c,
-                                        );
-                                    });
-                                }
                                 this.preview_key = None;
                                 this.refresh_previews();
                                 cx.notify();
@@ -1250,17 +1237,127 @@ impl Render for CursorManagerApp {
                         div()
                             .flex_1()
                             .min_w(px(90.))
-                            .max_w(px(180.))
-                            .children(
-                                self.size_slider
-                                    .as_ref()
-                                    .map(|st| Slider::new(st).into_any_element()),
-                            ),
+                            .h(px(26.))
+                            .child({
+                                let weak = cx.weak_entity();
+                                let drag = self.wavy_drag.clone();
+                                let accent = accent;
+                                let border = border;
+                                canvas(
+                                    {
+                                        // prepaint：注册鼠标事件（每帧重注册）
+                                        let drag = drag.clone();
+                                        let weak = weak.clone();
+                                        move |bounds, window, _| {
+                                            let frac_of = move |x: Pixels| -> f32 {
+                                                ((x - bounds.left()).max(px(0.0))
+                                                    / bounds.size.width)
+                                                    .clamp(0.0, 1.0)
+                                            };
+                                            window.on_mouse_event({
+                                                let drag = drag.clone();
+                                                let weak = weak.clone();
+                                                move |ev: &MouseDownEvent, _, _, cx| {
+                                                    if ev.button == MouseButton::Left
+                                                        && bounds.contains(&ev.position)
+                                                    {
+                                                        drag.set(true);
+                                                        let f = frac_of(ev.position.x);
+                                                        let _ = weak.update(cx, |s, cx| {
+                                                            s.set_wavy_frac(f, cx)
+                                                        });
+                                                    }
+                                                }
+                                            });
+                                            window.on_mouse_event({
+                                                let drag = drag.clone();
+                                                let weak = weak.clone();
+                                                move |ev: &MouseMoveEvent, _, _, cx| {
+                                                    if drag.get() {
+                                                        let f = frac_of(ev.position.x);
+                                                        let _ = weak.update(cx, |s, cx| {
+                                                            s.set_wavy_frac(f, cx)
+                                                        });
+                                                    }
+                                                }
+                                            });
+                                            window.on_mouse_event({
+                                                let drag = drag.clone();
+                                                let weak = weak.clone();
+                                                move |ev: &MouseUpEvent, _, _, cx| {
+                                                    if drag.get() && ev.button == MouseButton::Left
+                                                    {
+                                                        drag.set(false);
+                                                        let _ = weak.update(cx, |s, cx| {
+                                                            s.release_wavy(cx)
+                                                        });
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    },
+                                    {
+                                        // paint：M3 波浪轨道（活动段 accent / 非活动段 border）+ 圆形 thumb
+                                        let weak = weak.clone();
+                                        move |bounds, _, window, cx| {
+                                            let Some(ent) = weak.upgrade() else { return };
+                                            let app = ent.read(cx);
+                                            let frac = ((app.size as f32 - 8.0) / 120.0)
+                                                .clamp(0.0, 1.0);
+                                            let amp = app.wavy_amp;
+                                            let phase = app.wavy_phase;
+                                            let mid =
+                                                bounds.origin.y + bounds.size.height / 2.0;
+                                            let thumb_x =
+                                                bounds.left() + bounds.size.width * frac;
+                                            let seg = |window: &mut gpui_kit::Window,
+                                                       from: Pixels,
+                                                       to: Pixels,
+                                                       color: gpui_kit::Hsla| {
+                                                let mut pb = PathBuilder::stroke(px(3.0));
+                                                let w = f32::from(to - from);
+                                                let steps = ((w / 3.0).ceil() as usize).max(2);
+                                                for k in 0..=steps {
+                                                    let t = k as f32 / steps as f32;
+                                                    let x = f32::from(from) + w * t;
+                                                    let y = f32::from(mid)
+                                                        + amp * ((x / 9.0) + phase).sin();
+                                                    let pt = point(px(x), px(y));
+                                                    if k == 0 {
+                                                        pb.move_to(pt);
+                                                    } else {
+                                                        pb.line_to(pt);
+                                                    }
+                                                }
+                                                if let Ok(path) = pb.build() {
+                                                    window.paint_path(path, color);
+                                                }
+                                            };
+                                            seg(
+                                                window,
+                                                bounds.left(),
+                                                thumb_x,
+                                                accent,
+                                            );
+                                            seg(window, thumb_x, bounds.right(), border);
+                                            // thumb
+                                            let tb = Bounds::new(
+                                                point(thumb_x - px(5.5), mid - px(5.5)),
+                                                size(px(11.), px(11.)),
+                                            );
+                                            let mut q = fill(tb, accent);
+                                            q.corner_radii = px(5.5).into();
+                                            window.paint_quad(q);
+                                        }
+                                    },
+                                )
+                            }),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(muted)
+                            .flex_shrink_0()
                             .child(format!("{}px", self.size)),
                     )
                     .child(div().flex_1())
@@ -1378,9 +1475,14 @@ impl Render for CursorManagerApp {
                 };
                 let bottom = div()
                     .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(uninstall_btn)
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(uninstall_btn)
                     .child(
                         Button::new("apply")
                             .primary()
@@ -1432,14 +1534,24 @@ impl Render for CursorManagerApp {
                     } else {
                         div().into_any_element()
                     })
-                    .child(Label::new(self.status.clone()).text_sm().text_color(muted))
                     .child(
                         div()
-                            .flex_1()
-                            .text_right()
+                            .flex_shrink_0()
                             .text_xs()
                             .text_color(muted)
                             .child(format!("配置源 {n_ok}/{} 就绪", self.snapshot.len())),
+                    ))
+                    .child(
+                        div()
+                            .w_full()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(muted)
+                                    .whitespace_nowrap()
+                                    .child(self.status.clone()),
+                            ),
                     );
 
                 div()
@@ -1613,12 +1725,9 @@ fn main() {
             app_id: Some("cursor-manager".into()),
             ..Default::default()
         };
-        let (_, view) = gpui_kit::open_window(options, cx, |window, cx| {
-            let app = cx.new(|_| CursorManagerApp::new());
-            app.update(cx, |v, cx| v.init_slider(window, cx));
-            app
-        })
-        .expect("打开窗口失败");
+        let (_, view) =
+            gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| CursorManagerApp::new()))
+                .expect("打开窗口失败");
         view.update(cx, |v, cx| v.start_anim(cx));
         cx.activate(true);
     });
