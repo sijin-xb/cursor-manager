@@ -2,6 +2,8 @@
 
 Linux 桌面光标主题管理器。预览、应用、安装、卸载、在线下载 XCursor 主题。
 
+![主题列表、形状预览与配置写入状态](assets/screenshot.png)
+
 ![GPUI Kit](https://img.shields.io/badge/GPUI%20Kit-0.9-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 ## 安装
