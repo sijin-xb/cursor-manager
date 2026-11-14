@@ -1241,14 +1241,16 @@ impl Render for CursorManagerApp {
                             .child({
                                 let weak = cx.weak_entity();
                                 let drag = self.wavy_drag.clone();
-                                let accent = accent;
-                                let border = border;
                                 canvas(
                                     {
-                                        // prepaint：注册鼠标事件（每帧重注册）
+                                        // prepaint：把 bounds 交给 paint
+                                        move |bounds, _, _| bounds
+                                    },
+                                    {
+                                        // paint：注册鼠标事件 + 画 M3 波浪轨道
                                         let drag = drag.clone();
                                         let weak = weak.clone();
-                                        move |bounds, window, _| {
+                                        move |bounds, _, window, cx| {
                                             let frac_of = move |x: Pixels| -> f32 {
                                                 ((x - bounds.left()).max(px(0.0))
                                                     / bounds.size.width)
@@ -1294,12 +1296,6 @@ impl Render for CursorManagerApp {
                                                     }
                                                 }
                                             });
-                                        }
-                                    },
-                                    {
-                                        // paint：M3 波浪轨道（活动段 accent / 非活动段 border）+ 圆形 thumb
-                                        let weak = weak.clone();
-                                        move |bounds, _, window, cx| {
                                             let Some(ent) = weak.upgrade() else { return };
                                             let app = ent.read(cx);
                                             let frac = ((app.size as f32 - 8.0) / 120.0)
@@ -1337,15 +1333,15 @@ impl Render for CursorManagerApp {
                                                 window,
                                                 bounds.left(),
                                                 thumb_x,
-                                                accent,
+                                                fg,
                                             );
-                                            seg(window, thumb_x, bounds.right(), border);
+                                            seg(window, thumb_x, bounds.right(), muted);
                                             // thumb
                                             let tb = Bounds::new(
                                                 point(thumb_x - px(5.5), mid - px(5.5)),
                                                 size(px(11.), px(11.)),
                                             );
-                                            let mut q = fill(tb, accent);
+                                            let mut q = fill(tb, fg);
                                             q.corner_radii = px(5.5).into();
                                             window.paint_quad(q);
                                         }
