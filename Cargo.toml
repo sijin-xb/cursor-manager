@@ -1,0 +1,18 @@
+[package]
+name = "cursor-manager"
+version = "0.1.0"
+edition = "2024"
+description = "Cursor theme manager for Linux: preview, apply, install, uninstall and download XCursor themes"
+license = "MIT"
+
+[dependencies]
+gpui-kit = "0.9.1"
+xcursor = "0.3.11"
+image = "0.25"
+zip = "9.5.1"
+icns = "0.5.0"
+ureq = "2"
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
