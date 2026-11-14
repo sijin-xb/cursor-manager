@@ -80,7 +80,6 @@ struct CursorManagerApp {
     /// M3 波浪滑杆状态：拖动中标志 / 当前波幅 / 相位 / 轨道几何
     wavy_drag: Rc<Cell<bool>>,
     wavy_amp: f32,
-    wavy_phase: f32,
     wavy_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// false = 本地列表，true = 在线目录
     view_mode: bool,
@@ -131,7 +130,6 @@ impl CursorManagerApp {
             sort_by_time: false,
             wavy_drag: Rc::new(Cell::new(false)),
             wavy_amp: 0.0,
-            wavy_phase: 0.0,
             wavy_bounds: Rc::new(Cell::new(None)),
             view_mode: false,
             search: None,
@@ -164,14 +162,10 @@ impl CursorManagerApp {
                 let mut animated = false;
                 let alive = this
                     .update(cx, |s, cx| {
-                        // M3 波浪：拖动时波幅增大 + 相位滑动；静止衰减到细波并停更
+                        // M3 波浪：拖动时波幅增大；静止衰减到细波并停更（波形不滑动）
                         let target = if s.wavy_drag.get() { 3.2 } else { 1.1 };
                         s.wavy_amp += (target - s.wavy_amp) * 0.3;
-                        if s.wavy_drag.get() {
-                            s.wavy_phase += 0.5;
-                        }
-                        let animating = s.wavy_drag.get()
-                            || (s.wavy_amp - target).abs() > 0.03;
+                        let animating = (s.wavy_amp - target).abs() > 0.03;
                         for i in 0..s.previews.len() {
                             let Some(a) = &s.previews[i] else { continue };
                             if a.frames.len() < 2 {
@@ -1215,9 +1209,11 @@ impl Render for CursorManagerApp {
 
                 let size_row = div()
                     .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(Label::new("尺寸").text_sm())
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div().flex().items_center().gap_2()
+                        .child(Label::new("尺寸").text_sm())
                     .children(SIZES.map(|s| {
                         let mut b = Button::new(SharedString::from(format!("size-{s}")))
                             .small()
@@ -1237,9 +1233,8 @@ impl Render for CursorManagerApp {
                     }))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(90.))
-                            .h(px(36.))
+                            .w_full()
+                            .h(px(30.))
                             .id("wavy-track")
                             .relative()
                             .child({
@@ -1268,7 +1263,6 @@ impl Render for CursorManagerApp {
                                                 ((app.size as f32 - 8.0) / 120.0)
                                                     .clamp(0.0, 1.0);
                                             let amp = app.wavy_amp;
-                                            let phase = app.wavy_phase;
                                             let mid =
                                                 bounds.origin.y + bounds.size.height / 2.0;
                                             let thumb_x =
@@ -1285,7 +1279,7 @@ impl Render for CursorManagerApp {
                                                     let t = k as f32 / steps as f32;
                                                     let x = f32::from(from) + w * t;
                                                     let y = f32::from(mid)
-                                                        + amp * ((x / 9.0) + phase).sin();
+                                                        + amp * (x / 9.0).sin();
                                                     let pt = point(px(x), px(y));
                                                     if k == 0 {
                                                         pb.move_to(pt);
@@ -1366,23 +1360,149 @@ impl Render for CursorManagerApp {
                                     })
                             })
                     )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .flex_shrink_0()
+                                .child(format!("{}px", self.size)),
+                        )
+                        .child(
+                            Button::new("hotspot")
+                                .ghost()
+                                .small()
+                                .label(if self.show_hotspot { "隐藏热点" } else { "显示热点" })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_hotspot = !this.show_hotspot;
+                                    cx.notify();
+                                })),
+                        ),
+                    )
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(muted)
-                            .flex_shrink_0()
-                            .child(format!("{}px", self.size)),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("hotspot")
-                            .ghost()
-                            .small()
-                            .label(if self.show_hotspot { "隐藏热点" } else { "显示热点" })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_hotspot = !this.show_hotspot;
-                                cx.notify();
-                            })),
+                            .w_full()
+                            .h(px(30.))
+                            .id("wavy-track")
+                            .relative()
+                            .child({
+                                let tb = self.wavy_bounds.clone();
+                                let weak = cx.weak_entity();
+                                let accent = accent;
+                                let border = border;
+                                canvas(
+                                    {
+                                        let tb = tb.clone();
+                                        move |bounds, _, _| {
+                                            tb.set(Some(bounds));
+                                            bounds
+                                        }
+                                    },
+                                    {
+                                        let weak = weak.clone();
+                                        let accent = accent;
+                                        let border = border;
+                                        move |bounds, _, window, cx| {
+                                            let Some(ent) = weak.upgrade() else { return };
+                                            let app = ent.read(cx);
+                                            let frac =
+                                                ((app.size as f32 - 8.0) / 120.0)
+                                                    .clamp(0.0, 1.0);
+                                            let amp = app.wavy_amp;
+                                            let mid =
+                                                bounds.origin.y + bounds.size.height / 2.0;
+                                            let thumb_x =
+                                                bounds.left() + bounds.size.width * frac;
+                                            let seg = |window: &mut gpui_kit::Window,
+                                                       from: Pixels,
+                                                       to: Pixels,
+                                                       color: gpui_kit::Hsla| {
+                                                let mut pb = PathBuilder::stroke(px(3.0));
+                                                let w = f32::from(to - from);
+                                                let steps =
+                                                    ((w / 3.0).ceil() as usize).max(2);
+                                                for k in 0..=steps {
+                                                    let t = k as f32 / steps as f32;
+                                                    let x = f32::from(from) + w * t;
+                                                    let y = f32::from(mid)
+                                                        + amp * (x / 9.0).sin();
+                                                    let pt = point(px(x), px(y));
+                                                    if k == 0 {
+                                                        pb.move_to(pt);
+                                                    } else {
+                                                        pb.line_to(pt);
+                                                    }
+                                                }
+                                                if let Ok(path) = pb.build() {
+                                                    window.paint_path(path, color);
+                                                }
+                                            };
+                                            seg(window, bounds.left(), thumb_x, accent);
+                                            seg(window, thumb_x, bounds.right(), border);
+                                            let tbq = Bounds::new(
+                                                point(thumb_x - px(5.5), mid - px(5.5)),
+                                                size(px(11.), px(11.)),
+                                            );
+                                            let mut q = fill(tbq, accent);
+                                            q.corner_radii = px(5.5).into();
+                                            window.paint_quad(q);
+                                        }
+                                    },
+                                )
+                            })
+                            .child({
+                                let drag = self.wavy_drag.clone();
+                                let tb = self.wavy_bounds.clone();
+                                let weak = cx.weak_entity();
+                                let frac_of = |b: Bounds<Pixels>, x: Pixels| -> f32 {
+                                    ((x - b.left()).max(px(0.0)) / b.size.width)
+                                        .clamp(0.0, 1.0)
+                                };
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, {
+                                        let drag = drag.clone();
+                                        let tb = tb.clone();
+                                        let weak = weak.clone();
+                                        move |ev: &MouseDownEvent, _, cx| {
+                                            drag.set(true);
+                                            if let Some(b) = tb.get() {
+                                                let f = frac_of(b, ev.position.x);
+                                                let _ = weak.update(cx, |s, cx| {
+                                                    s.set_wavy_frac(f, cx)
+                                                });
+                                            }
+                                        }
+                                    })
+                                    .on_mouse_move({
+                                        let drag = drag.clone();
+                                        let tb = tb.clone();
+                                        let weak = weak.clone();
+                                        move |ev: &MouseMoveEvent, _, cx| {
+                                            if drag.get() {
+                                                if let Some(b) = tb.get() {
+                                                    let f = frac_of(b, ev.position.x);
+                                                    let _ = weak.update(cx, |s, cx| {
+                                                        s.set_wavy_frac(f, cx)
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    })
+                                    .on_mouse_up(MouseButton::Left, {
+                                        let drag = drag.clone();
+                                        let weak = weak.clone();
+                                        move |_ev: &MouseUpEvent, _, cx| {
+                                            if drag.get() {
+                                                drag.set(false);
+                                                let _ = weak.update(cx, |s, cx| {
+                                                    s.release_wavy(cx)
+                                                });
+                                            }
+                                        }
+                                    })
+                            })
                     );
 
                 let targets = div()
