@@ -40,9 +40,9 @@ pub fn sniff_archive_ext(path: &Path) -> Option<&'static str> {
         return None;
     }
     match b[..8] {
-        [0x1f, 0x8b, ..] => return Some("tar.gz"),       // gzip
-        [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, ..] => return Some("tar.xz"), // xz
-        [0x42, 0x5a, 0x68, ..] => return Some("tar.bz2"), // bzip2
+        [0x1f, 0x8b, ..] => return Some("gz"),       // gzip
+        [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, ..] => return Some("xz"), // xz
+        [0x42, 0x5a, 0x68, ..] => return Some("bz2"), // bzip2
         [0x50, 0x4b, 0x03, 0x04, ..] | [0x50, 0x4b, 0x05, 0x06, ..] => return Some("zip"),
         _ => {}
     }
@@ -1104,3 +1104,4 @@ mod tests {
         fs::remove_dir_all(&target).unwrap();
     }
 }
+
