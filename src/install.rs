@@ -32,6 +32,29 @@ pub struct Frame {
 
 // ─────────────────────────── 入口 ───────────────────────────
 
+/// 按文件头嗅探压缩包类型（下载的文件经常没有扩展名）。
+pub fn sniff_archive_ext(path: &Path) -> Option<&'static str> {
+    let mut b = [0u8; 300];
+    let n = fs::File::open(path).ok()?.read(&mut b).ok()?;
+    if n < 8 {
+        return None;
+    }
+    match b[..8] {
+        [0x1f, 0x8b, ..] => return Some("tar.gz"),       // gzip
+        [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, ..] => return Some("tar.xz"), // xz
+        [0x42, 0x5a, 0x68, ..] => return Some("tar.bz2"), // bzip2
+        [0x50, 0x4b, 0x03, 0x04, ..] | [0x50, 0x4b, 0x05, 0x06, ..] => return Some("zip"),
+        _ => {}
+    }
+    // tar：magic "ustar" 在偏移 257
+    if n >= 262 && &b[257..262] == b"ustar" {
+        return Some("tar");
+    }
+    None
+}
+
+const HANDLED_EXTS: &[&str] = &["zip", "xz", "gz", "txz", "tgz", "bz2", "tar", "cur", "ani", "icns"];
+
 pub fn install(src: &Path) -> Result<InstallOutcome, String> {
     let raw_name = src
         .file_stem()
@@ -48,10 +71,16 @@ pub fn install(src: &Path) -> Result<InstallOutcome, String> {
 }
 
 fn install_inner(src: &Path, raw_name: &str, staging: &Path) -> Result<InstallOutcome, String> {
-    let ext = src
+    let mut ext = src
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
+    // 无扩展名 / 不认识的扩展名 → 按文件头嗅探（在线下载的临时文件常见）
+    if src.is_file() && !ext.as_deref().map(|e| HANDLED_EXTS.contains(&e)).unwrap_or(false) {
+        if let Some(sn) = sniff_archive_ext(src) {
+            ext = Some(sn.to_string());
+        }
+    }
 
     let (pack_root, name_base) = if src.is_dir() {
         (src.to_path_buf(), raw_name.to_string())
@@ -62,7 +91,7 @@ fn install_inner(src: &Path, raw_name: &str, staging: &Path) -> Result<InstallOu
                 extract_zip(src, &dest)?;
                 (dest, raw_name.to_string())
             }
-            Some("xz") | Some("gz") | Some("txz") | Some("tgz") | Some("bz2") => {
+            Some("xz") | Some("gz") | Some("txz") | Some("tgz") | Some("bz2") | Some("tar") => {
                 let dest = staging.join("tar");
                 fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
                 // 交给系统 tar：xz/gz/bz2 无需额外依赖

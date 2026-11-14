@@ -77,3 +77,15 @@ pub fn build_anim(images: Vec<XImage>, target: u32) -> Option<AnimShape> {
         delays_ms: delays,
     })
 }
+
+/// 从磁盘图片文件（png/jpeg 等）构建 RenderImage（缩略图用）。
+pub fn image_from_file(path: &Path) -> Option<Arc<RenderImage>> {
+    let img = image::open(path).ok()?;
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let buf = RgbaImage::from_raw(w, h, to_bgra_pa(rgba.as_raw()))?;
+    Some(Arc::new(RenderImage::new(vec![Frame::new(buf)])))
+}

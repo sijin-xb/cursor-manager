@@ -102,6 +102,7 @@ pub fn is_installable_asset(name: &str) -> bool {
 pub fn download_to(url: &str, dest: &Path) -> Result<u64, String> {
     let resp = ureq::get(url)
         .set("User-Agent", "cursor-manager")
+        .timeout(std::time::Duration::from_secs(60))
         .call()
         .map_err(|e| format!("下载失败: {e}"))?;
     let mut reader = resp.into_reader();
@@ -123,6 +124,8 @@ pub struct PlingItem {
     pub thumb: String,
     pub page_url: String,
     pub download: String,
+    /// 本地缓存的缩略图路径（拉取列表时顺带下载）
+    pub local_thumb: Option<String>,
 }
 
 pub struct PlingPage {
@@ -145,6 +148,7 @@ pub fn pling_search(query: Option<&str>, page: u32, sort: &str) -> Result<PlingP
     }
     let text = req
         .set("User-Agent", "cursor-manager")
+        .timeout(std::time::Duration::from_secs(20))
         .call()
         .map_err(|e| format!("请求失败: {e}"))?
         .into_string()
@@ -179,6 +183,7 @@ pub fn pling_search(query: Option<&str>, page: u32, sort: &str) -> Result<PlingP
                 thumb: it["smallpreviewpic1"].as_str().unwrap_or("").to_string(),
                 page_url: it["detailpage"].as_str().unwrap_or("").to_string(),
                 download: it["downloadlink1"].as_str().unwrap_or("").to_string(),
+                local_thumb: None,
             });
         }
     }

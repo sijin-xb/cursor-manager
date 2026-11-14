@@ -9,7 +9,7 @@ mod online;
 mod preview;
 mod themes;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -84,6 +84,8 @@ struct CursorManagerApp {
     pling_mode: bool,
     online_search: Option<Entity<InputState>>,
     pling_items: Option<Result<online::PlingPage, String>>,
+    /// pling 缩略图解码缓存（id → 渲染图）
+    thumb_cache: HashMap<u64, Option<Arc<RenderImage>>>,
     pling_page: u32,
     pling_query: Option<String>,
     pling_sort: &'static str,
@@ -125,6 +127,7 @@ impl CursorManagerApp {
             pling_mode: true,
             online_search: None,
             pling_items: None,
+            thumb_cache: HashMap::new(),
             pling_page: 1,
             pling_query: None,
             pling_sort: "highRating",
@@ -281,11 +284,40 @@ impl CursorManagerApp {
         cx.spawn(async move |this, cx| {
             let res = cx
                 .background_executor()
-                .spawn(async move { online::pling_search(query.as_deref(), page, sort) })
+                .spawn(async move {
+                    let r = online::pling_search(query.as_deref(), page, sort);
+                    match r {
+                        Ok(mut pg) => {
+                            let cache = std::path::PathBuf::from(
+                                std::env::var("HOME").unwrap_or_default(),
+                            )
+                            .join(".cache/cursor-manager/thumbs");
+                            let _ = std::fs::create_dir_all(&cache);
+                            let mut thumbs: HashMap<u64, Option<Arc<RenderImage>>> =
+                                HashMap::new();
+                            for it in &mut pg.items {
+                                if it.thumb.is_empty() {
+                                    continue;
+                                }
+                                let dest = cache.join(format!("{}.img", it.id));
+                                if !dest.exists() {
+                                    let _ = online::download_to(&it.thumb, &dest);
+                                }
+                                it.local_thumb =
+                                    Some(dest.to_string_lossy().to_string());
+                                thumbs.insert(it.id, preview::image_from_file(&dest));
+                            }
+                            (Ok(pg), thumbs)
+                        }
+                        Err(e) => (Err(e), HashMap::new()),
+                    }
+                })
                 .await;
+            let (page_res, thumbs) = res;
             let _ = this.update(cx, |s, cx| {
                 s.online_busy = false;
-                s.pling_items = Some(res);
+                s.thumb_cache = thumbs;
+                s.pling_items = Some(page_res);
                 cx.notify();
             });
         })
@@ -458,7 +490,6 @@ impl CursorManagerApp {
                             .child(format!("GNOME-Look 光标主题 共 {} 个", page.total)),
                     );
                     for (k, it) in page.items.iter().enumerate() {
-                        let thumb = it.thumb.clone();
                         let aname = it.name.clone();
                         let url = it.download.clone();
                         let row = div()
@@ -474,8 +505,10 @@ impl CursorManagerApp {
                             .hover(move |s| s.bg(hoverbg))
                             .child(
                                 div().w(px(56.)).h(px(36.)).overflow_hidden().children(
-                                    (!thumb.is_empty())
-                                        .then(|| img(thumb.clone()).w(px(56.)).h(px(36.))),
+                                    match self.thumb_cache.get(&it.id) {
+                                        Some(Some(im)) => Some(img(im.clone()).w(px(56.))),
+                                        _ => None,
+                                    },
                                 ),
                             )
                             .child(
