@@ -73,6 +73,8 @@ struct CursorManagerApp {
     status: String,
     /// 卸载按钮的两段式确认状态
     pending_uninstall: bool,
+    /// 本地列表排序：false = 名称，true = 修改时间（新→旧）
+    sort_by_time: bool,
     /// false = 本地列表，true = 在线目录
     view_mode: bool,
     search: Option<Entity<InputState>>,
@@ -119,6 +121,7 @@ impl CursorManagerApp {
             sizes_avail: Vec::new(),
             status: "就绪 —— 左侧选择主题，右下应用".into(),
             pending_uninstall: false,
+            sort_by_time: false,
             view_mode: false,
             search: None,
             online_assets: None,
@@ -773,16 +776,28 @@ impl Render for CursorManagerApp {
             .as_ref()
             .map(|e| e.read(cx).value().to_lowercase())
             .unwrap_or_default();
-        let rows: Vec<_> = self
-            .themes
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| {
+        let mut order: Vec<usize> = (0..self.themes.len())
+            .filter(|&i| {
+                let t = &self.themes[i];
                 filter.is_empty()
                     || t.name.to_lowercase().contains(&filter)
                     || t.id.to_lowercase().contains(&filter)
             })
-            .map(|(i, theme)| {
+            .collect();
+        if self.sort_by_time {
+            order.sort_by(|&a, &b| self.themes[b].mtime.cmp(&self.themes[a].mtime));
+        } else {
+            order.sort_by(|&a, &b| {
+                self.themes[a]
+                    .id
+                    .to_lowercase()
+                    .cmp(&self.themes[b].id.to_lowercase())
+            });
+        }
+        let rows: Vec<_> = order
+            .into_iter()
+            .map(|i| {
+                let theme = &self.themes[i];
                 let is_sel = self.selected == Some(i);
                 let is_cur = current_id.as_deref() == Some(theme.id.as_str());
                 let row = div()
@@ -791,9 +806,9 @@ impl Render for CursorManagerApp {
                     .items_center()
                     .justify_between()
                     .px_3()
-                    .py_1p5()
+                    .py_2()
                     .mx_2()
-                    .rounded_sm()
+                    .rounded_xl() // M3 list item: medium-increased 圆角
                     .cursor_pointer()
                     .hover(move |s| s.bg(hoverbg))
                     .child(
@@ -802,13 +817,7 @@ impl Render for CursorManagerApp {
                             .items_center()
                             .gap_2()
                             .min_w_0()
-                            // 选中指示条
-                            .child(if is_sel {
-                                div().w(px(3.)).h(px(20.)).rounded_full().bg(accent)
-                            } else {
-                                div().w(px(3.))
-                            })
-                            // 行首指针小图
+                            // 行首指针小图（M3 leading avatar）
                             .child(
                                 div().w(px(34.)).flex().justify_center().children(
                                     self.row_previews.get(i).cloned().flatten().map(
@@ -822,11 +831,14 @@ impl Render for CursorManagerApp {
                                     .flex_col()
                                     .min_w_0()
                                     .child(
-                                        // 选中态不用 accent 文字色：默认暗色主题的 accent
-                                        // 画在选中底色上几乎不可见
                                         div()
                                             .text_sm()
                                             .text_color(fg)
+                                            .font_weight(if is_sel {
+                                                FontWeight::SEMIBOLD
+                                            } else {
+                                                FontWeight::NORMAL
+                                            })
                                             .child(theme.name.clone()),
                                     )
                                     .child(
@@ -875,12 +887,50 @@ impl Render for CursorManagerApp {
         let _ = &border;
 
         let count_row: AnyElement = if !self.view_mode {
+            let chip = |id: &'static str, label: &'static str, active: bool| {
+                let base = div()
+                    .id(SharedString::from(id))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full() // M3 chip: full pill
+                    .text_xs()
+                    .cursor_pointer()
+                    .child(label.to_string());
+                if active {
+                    base.bg(selbg).text_color(fg)
+                } else {
+                    base.border_1().border_color(border).text_color(muted)
+                }
+            };
             div()
-                .px_3()
+                .flex()
+                .items_center()
+                .px_2()
                 .pb_1()
-                .text_xs()
-                .text_color(muted)
-                .child(format!("已安装主题（{}）", self.themes.len()))
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("已安装主题（{}）", self.themes.len())),
+                )
+                .child(div().flex_1())
+                .child(
+                    chip("sort-name", "名称", !self.sort_by_time).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.sort_by_time = false;
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .child(
+                    chip("sort-time", "时间", self.sort_by_time).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.sort_by_time = true;
+                            cx.notify();
+                        }),
+                    ),
+                )
                 .into_any_element()
         } else {
             div().into_any_element()
@@ -918,13 +968,21 @@ impl Render for CursorManagerApp {
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .gap_1()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(border)
+                            .p(px(2.))
                             .child(
-                                Button::new("tab-local")
-                                    .small()
-                                    .label("本地")
-                                    .selected(!self.view_mode)
+                                div()
+                                    .id("tab-local")
+                                    .px_3()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .text_color(if !self.view_mode { fg } else { muted })
+                                    .bg(if !self.view_mode { selbg } else { bg })
+                                    .child("本地")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.view_mode = false;
                                         this.pending_uninstall = false;
@@ -932,10 +990,16 @@ impl Render for CursorManagerApp {
                                     })),
                             )
                             .child(
-                                Button::new("tab-online")
-                                    .small()
-                                    .label("在线")
-                                    .selected(self.view_mode)
+                                div()
+                                    .id("tab-online")
+                                    .px_3()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .text_color(if self.view_mode { fg } else { muted })
+                                    .bg(if self.view_mode { selbg } else { bg })
+                                    .child("在线")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.view_mode = true;
                                         this.pending_uninstall = false;
@@ -1069,7 +1133,7 @@ impl Render for CursorManagerApp {
                     .flex_wrap()
                     .gap_4()
                     .p_3()
-                    .rounded_md()
+                    .rounded_2xl()
                     .border_1()
                     .border_color(border)
                     .children(self.previews.iter().enumerate().map(|(i, pv)| {
@@ -1151,7 +1215,7 @@ impl Render for CursorManagerApp {
                     .flex_col()
                     .gap_1()
                     .p_2()
-                    .rounded_md()
+                    .rounded_2xl()
                     .border_1()
                     .border_color(border)
                     .children(self.snapshot.iter().map(|r| {
@@ -1180,7 +1244,7 @@ impl Render for CursorManagerApp {
                     .gap_1()
                     .items_center()
                     .p_2()
-                    .rounded_md()
+                    .rounded_2xl()
                     .border_1()
                     .border_color(border)
                     .child(
@@ -1255,6 +1319,7 @@ impl Render for CursorManagerApp {
                     .child(
                         Button::new("apply")
                             .primary()
+                            .rounded(px(999.))
                             .label(format!("应用 {} / {}", theme.id, self.size))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let Some(idx) = this.selected else { return };

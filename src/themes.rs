@@ -12,6 +12,8 @@ pub struct CursorTheme {
     pub name: String,
     pub comment: String,
     pub dir: PathBuf,
+    /// 主题目录修改时间（时间排序用）
+    pub mtime: std::time::SystemTime,
 }
 
 /// 预览形状及候选光标文件名（手工维护的 X11 alias 链）。
@@ -75,11 +77,15 @@ pub fn scan() -> Vec<CursorTheme> {
                 continue;
             }
             seen.push(id.clone());
+            let mtime = fs::metadata(&dir)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             out.push(CursorTheme {
                 name: meta.get("name").cloned().unwrap_or_else(|| id.clone()),
                 comment: meta.get("comment").cloned().unwrap_or_default(),
                 dir,
                 id,
+                mtime,
             });
         }
     }

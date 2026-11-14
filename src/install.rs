@@ -1104,4 +1104,3 @@ mod tests {
         fs::remove_dir_all(&target).unwrap();
     }
 }
-
