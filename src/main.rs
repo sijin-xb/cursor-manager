@@ -1254,8 +1254,6 @@ impl Render for CursorManagerApp {
                                     {
                                         // paint：画 M3 波浪轨道 + thumb
                                         let weak = weak.clone();
-                                        let accent = accent;
-                                        let border = border;
                                         move |bounds, _, window, cx| {
                                             let Some(ent) = weak.upgrade() else { return };
                                             let app = ent.read(cx);
@@ -1291,13 +1289,13 @@ impl Render for CursorManagerApp {
                                                     window.paint_path(path, color);
                                                 }
                                             };
-                                            seg(window, bounds.left(), thumb_x, accent);
-                                            seg(window, thumb_x, bounds.right(), border);
+                                            seg(window, bounds.left(), thumb_x, fg);
+                                            seg(window, thumb_x, bounds.right(), muted);
                                             let tbq = Bounds::new(
                                                 point(thumb_x - px(5.5), mid - px(5.5)),
                                                 size(px(11.), px(11.)),
                                             );
-                                            let mut q = fill(tbq, accent);
+                                            let mut q = fill(tbq, fg);
                                             q.corner_radii = px(5.5).into();
                                             window.paint_quad(q);
                                         }
@@ -1399,8 +1397,6 @@ impl Render for CursorManagerApp {
                                     },
                                     {
                                         let weak = weak.clone();
-                                        let accent = accent;
-                                        let border = border;
                                         move |bounds, _, window, cx| {
                                             let Some(ent) = weak.upgrade() else { return };
                                             let app = ent.read(cx);
@@ -1436,13 +1432,13 @@ impl Render for CursorManagerApp {
                                                     window.paint_path(path, color);
                                                 }
                                             };
-                                            seg(window, bounds.left(), thumb_x, accent);
-                                            seg(window, thumb_x, bounds.right(), border);
+                                            seg(window, bounds.left(), thumb_x, fg);
+                                            seg(window, thumb_x, bounds.right(), muted);
                                             let tbq = Bounds::new(
                                                 point(thumb_x - px(5.5), mid - px(5.5)),
                                                 size(px(11.), px(11.)),
                                             );
-                                            let mut q = fill(tbq, accent);
+                                            let mut q = fill(tbq, fg);
                                             q.corner_radii = px(5.5).into();
                                             window.paint_quad(q);
                                         }
