@@ -77,10 +77,11 @@ struct CursorManagerApp {
     pending_uninstall: bool,
     /// 本地列表排序：false = 名称，true = 修改时间（新→旧）
     sort_by_time: bool,
-    /// M3 波浪滑杆状态：拖动中标志 / 当前波幅 / 相位
+    /// M3 波浪滑杆状态：拖动中标志 / 当前波幅 / 相位 / 轨道几何
     wavy_drag: Rc<Cell<bool>>,
     wavy_amp: f32,
     wavy_phase: f32,
+    wavy_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// false = 本地列表，true = 在线目录
     view_mode: bool,
     search: Option<Entity<InputState>>,
@@ -131,6 +132,7 @@ impl CursorManagerApp {
             wavy_drag: Rc::new(Cell::new(false)),
             wavy_amp: 0.0,
             wavy_phase: 0.0,
+            wavy_bounds: Rc::new(Cell::new(None)),
             view_mode: false,
             search: None,
             online_assets: None,
@@ -1237,69 +1239,34 @@ impl Render for CursorManagerApp {
                         div()
                             .flex_1()
                             .min_w(px(90.))
-                            .h(px(26.))
+                            .h(px(36.))
+                            .id("wavy-track")
+                            .relative()
                             .child({
+                                let tb = self.wavy_bounds.clone();
                                 let weak = cx.weak_entity();
-                                let drag = self.wavy_drag.clone();
+                                let accent = accent;
+                                let border = border;
                                 canvas(
                                     {
-                                        // prepaint：把 bounds 交给 paint
-                                        move |bounds, _, _| bounds
+                                        // prepaint：捕获轨道几何（供覆盖层算 frac）
+                                        let tb = tb.clone();
+                                        move |bounds, _, _| {
+                                            tb.set(Some(bounds));
+                                            bounds
+                                        }
                                     },
                                     {
-                                        // paint：注册鼠标事件 + 画 M3 波浪轨道
-                                        let drag = drag.clone();
+                                        // paint：画 M3 波浪轨道 + thumb
                                         let weak = weak.clone();
+                                        let accent = accent;
+                                        let border = border;
                                         move |bounds, _, window, cx| {
-                                            let frac_of = move |x: Pixels| -> f32 {
-                                                ((x - bounds.left()).max(px(0.0))
-                                                    / bounds.size.width)
-                                                    .clamp(0.0, 1.0)
-                                            };
-                                            window.on_mouse_event({
-                                                let drag = drag.clone();
-                                                let weak = weak.clone();
-                                                move |ev: &MouseDownEvent, _, _, cx| {
-                                                    if ev.button == MouseButton::Left
-                                                        && bounds.contains(&ev.position)
-                                                    {
-                                                        drag.set(true);
-                                                        let f = frac_of(ev.position.x);
-                                                        let _ = weak.update(cx, |s, cx| {
-                                                            s.set_wavy_frac(f, cx)
-                                                        });
-                                                    }
-                                                }
-                                            });
-                                            window.on_mouse_event({
-                                                let drag = drag.clone();
-                                                let weak = weak.clone();
-                                                move |ev: &MouseMoveEvent, _, _, cx| {
-                                                    if drag.get() {
-                                                        let f = frac_of(ev.position.x);
-                                                        let _ = weak.update(cx, |s, cx| {
-                                                            s.set_wavy_frac(f, cx)
-                                                        });
-                                                    }
-                                                }
-                                            });
-                                            window.on_mouse_event({
-                                                let drag = drag.clone();
-                                                let weak = weak.clone();
-                                                move |ev: &MouseUpEvent, _, _, cx| {
-                                                    if drag.get() && ev.button == MouseButton::Left
-                                                    {
-                                                        drag.set(false);
-                                                        let _ = weak.update(cx, |s, cx| {
-                                                            s.release_wavy(cx)
-                                                        });
-                                                    }
-                                                }
-                                            });
                                             let Some(ent) = weak.upgrade() else { return };
                                             let app = ent.read(cx);
-                                            let frac = ((app.size as f32 - 8.0) / 120.0)
-                                                .clamp(0.0, 1.0);
+                                            let frac =
+                                                ((app.size as f32 - 8.0) / 120.0)
+                                                    .clamp(0.0, 1.0);
                                             let amp = app.wavy_amp;
                                             let phase = app.wavy_phase;
                                             let mid =
@@ -1312,7 +1279,8 @@ impl Render for CursorManagerApp {
                                                        color: gpui_kit::Hsla| {
                                                 let mut pb = PathBuilder::stroke(px(3.0));
                                                 let w = f32::from(to - from);
-                                                let steps = ((w / 3.0).ceil() as usize).max(2);
+                                                let steps =
+                                                    ((w / 3.0).ceil() as usize).max(2);
                                                 for k in 0..=steps {
                                                     let t = k as f32 / steps as f32;
                                                     let x = f32::from(from) + w * t;
@@ -1329,25 +1297,74 @@ impl Render for CursorManagerApp {
                                                     window.paint_path(path, color);
                                                 }
                                             };
-                                            seg(
-                                                window,
-                                                bounds.left(),
-                                                thumb_x,
-                                                fg,
-                                            );
-                                            seg(window, thumb_x, bounds.right(), muted);
-                                            // thumb
-                                            let tb = Bounds::new(
+                                            seg(window, bounds.left(), thumb_x, accent);
+                                            seg(window, thumb_x, bounds.right(), border);
+                                            let tbq = Bounds::new(
                                                 point(thumb_x - px(5.5), mid - px(5.5)),
                                                 size(px(11.), px(11.)),
                                             );
-                                            let mut q = fill(tb, fg);
+                                            let mut q = fill(tbq, accent);
                                             q.corner_radii = px(5.5).into();
                                             window.paint_quad(q);
                                         }
                                     },
                                 )
-                            }),
+                            })
+                            .child({
+                                // 交互覆盖层：元素级鼠标处理器（按钮同款机制）
+                                let drag = self.wavy_drag.clone();
+                                let tb = self.wavy_bounds.clone();
+                                let weak = cx.weak_entity();
+                                let frac_of = |b: Bounds<Pixels>, x: Pixels| -> f32 {
+                                    ((x - b.left()).max(px(0.0)) / b.size.width)
+                                        .clamp(0.0, 1.0)
+                                };
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, {
+                                        let drag = drag.clone();
+                                        let tb = tb.clone();
+                                        let weak = weak.clone();
+                                        move |ev: &MouseDownEvent, _, cx| {
+                                            drag.set(true);
+                                            if let Some(b) = tb.get() {
+                                                let f = frac_of(b, ev.position.x);
+                                                let _ = weak.update(cx, |s, cx| {
+                                                    s.set_wavy_frac(f, cx)
+                                                });
+                                            }
+                                        }
+                                    })
+                                    .on_mouse_move({
+                                        let drag = drag.clone();
+                                        let tb = tb.clone();
+                                        let weak = weak.clone();
+                                        move |ev: &MouseMoveEvent, _, cx| {
+                                            if drag.get() {
+                                                if let Some(b) = tb.get() {
+                                                    let f = frac_of(b, ev.position.x);
+                                                    let _ = weak.update(cx, |s, cx| {
+                                                        s.set_wavy_frac(f, cx)
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    })
+                                    .on_mouse_up(MouseButton::Left, {
+                                        let drag = drag.clone();
+                                        let weak = weak.clone();
+                                        move |_ev: &MouseUpEvent, _, cx| {
+                                            if drag.get() {
+                                                drag.set(false);
+                                                let _ = weak.update(cx, |s, cx| {
+                                                    s.release_wavy(cx)
+                                                });
+                                            }
+                                        }
+                                    })
+                            })
                     )
                     .child(
                         div()
