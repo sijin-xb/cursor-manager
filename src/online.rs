@@ -109,3 +109,78 @@ pub fn download_to(url: &str, dest: &Path) -> Result<u64, String> {
     let n = std::io::copy(&mut reader, &mut f).map_err(|e| format!("写入失败: {e}"))?;
     Ok(n)
 }
+
+// ─────────────────── GNOME-Look / KDE Store（pling OCS API） ───────────────────
+
+pub const PLING_CATEGORY_CURSORS: &str = "107"; // gnome-look "Cursors"（X11 Mouse Theme）
+
+pub struct PlingItem {
+    pub id: u64,
+    pub name: String,
+    pub author: String,
+    pub score: i64,
+    pub downloads: u64,
+    pub thumb: String,
+    pub page_url: String,
+    pub download: String,
+}
+
+pub struct PlingPage {
+    pub total: u32,
+    pub items: Vec<PlingItem>,
+}
+
+/// 搜索 GNOME-Look 光标分类。sort: "highRating" | "new"
+pub fn pling_search(query: Option<&str>, page: u32, sort: &str) -> Result<PlingPage, String> {
+    let mut req = ureq::get("https://api.pling.com/ocs/v1/content/data")
+        .query("format", "json")
+        .query("categories", PLING_CATEGORY_CURSORS)
+        .query("pagesize", "20")
+        .query("page", &page.to_string())
+        .query("sortmode", sort);
+    if let Some(q) = query {
+        if !q.trim().is_empty() {
+            req = req.query("search", q.trim());
+        }
+    }
+    let text = req
+        .set("User-Agent", "cursor-manager")
+        .call()
+        .map_err(|e| format!("请求失败: {e}"))?
+        .into_string()
+        .map_err(|e| format!("读取响应失败: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("JSON 解析失败: {e}"))?;
+    if v["status"].as_str() == Some("failed") {
+        return Err(format!(
+            "pling: {}",
+            v["message"].as_str().unwrap_or("unknown error")
+        ));
+    }
+    let total = v["totalitems"].as_u64().unwrap_or(0) as u32;
+    let mut items = Vec::new();
+    let arr = match v.get("data") {
+        Some(serde_json::Value::Object(o)) => o.get("content").cloned(),
+        Some(other) => Some(other.clone()),
+        None => None,
+    };
+    if let Some(serde_json::Value::Array(list)) = arr {
+        for it in list {
+            let name = it["name"].as_str().unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+            items.push(PlingItem {
+                id: it["id"].as_u64().unwrap_or(0),
+                name,
+                author: it["personid"].as_str().unwrap_or("").to_string(),
+                score: it["score"].as_i64().unwrap_or(0),
+                downloads: it["downloads"].as_u64().unwrap_or(0),
+                thumb: it["smallpreviewpic1"].as_str().unwrap_or("").to_string(),
+                page_url: it["detailpage"].as_str().unwrap_or("").to_string(),
+                download: it["downloadlink1"].as_str().unwrap_or("").to_string(),
+            });
+        }
+    }
+    Ok(PlingPage { total, items })
+}

@@ -80,6 +80,13 @@ struct CursorManagerApp {
     online_assets: Option<Result<online::ReleaseAssets, String>>,
     online_sel: Option<usize>,
     online_busy: bool,
+    /// 在线子源：true = GNOME-Look（pling OCS），false = GitHub 策展
+    pling_mode: bool,
+    online_search: Option<Entity<InputState>>,
+    pling_items: Option<Result<online::PlingPage, String>>,
+    pling_page: u32,
+    pling_query: Option<String>,
+    pling_sort: &'static str,
     /// 已应用主题历史（新→旧），供撤销
     history: Vec<String>,
     show_hotspot: bool,
@@ -115,6 +122,12 @@ impl CursorManagerApp {
             online_assets: None,
             online_sel: None,
             online_busy: false,
+            pling_mode: true,
+            online_search: None,
+            pling_items: None,
+            pling_page: 1,
+            pling_query: None,
+            pling_sort: "highRating",
             history: load_history(),
             show_hotspot: false,
             shape_set: HashSet::new(),
@@ -258,7 +271,66 @@ impl CursorManagerApp {
             .unwrap_or(false)
     }
 
-    /// 渲染在线列表（目录 → 资产两级）
+    /// 拉取 GNOME-Look 光标列表
+    fn fetch_pling(&mut self, cx: &mut Context<Self>) {
+        self.online_busy = true;
+        cx.notify();
+        let query = self.pling_query.clone();
+        let page = self.pling_page.max(1);
+        let sort = self.pling_sort;
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move { online::pling_search(query.as_deref(), page, sort) })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.online_busy = false;
+                s.pling_items = Some(res);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 在线下载并安装（pling 直链 / GitHub 资产通用）
+    fn download_and_install(&mut self, aname: String, url: String, cx: &mut Context<Self>) {
+        self.online_busy = true;
+        self.status = format!("正在下载 {aname} …");
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move {
+                    let tmp =
+                        std::env::temp_dir().join(format!("cm-dl-{}", std::process::id()));
+                    let _ = std::fs::remove_file(&tmp);
+                    match online::download_to(&url, &tmp) {
+                        Ok(bytes) => install::install(&tmp).map(|o| (o, bytes)),
+                        Err(e) => Err(format!("下载失败: {e}")),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.online_busy = false;
+                match res {
+                    Ok((o, bytes)) => {
+                        s.status = format!("已下载 {}KB —— {}", bytes / 1024, o.detail);
+                        s.themes = themes::scan();
+                        s.row_previews = compute_row_previews(&s.themes);
+                        if let Some(i) = s.themes.iter().position(|t| t.id == o.name) {
+                            s.view_mode = false;
+                            s.select_index(i, cx);
+                        }
+                    }
+                    Err(e) => s.status = e,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 渲染在线列表：GNOME-Look（缩略图/排序/翻页）与 GitHub 策展两级
     fn render_online(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = cx.theme();
         let fg = t.colors.foreground;
@@ -275,6 +347,231 @@ impl CursorManagerApp {
             .overflow_y_scroll()
             .pb_2();
 
+        // 子源切换
+        list = list.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .pb_1()
+                .child(
+                    Button::new("src-pling")
+                        .small()
+                        .label("GNOME-Look")
+                        .selected(self.pling_mode)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.pling_mode = true;
+                            if this.pling_items.is_none() && !this.online_busy {
+                                this.fetch_pling(cx);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("src-github")
+                        .small()
+                        .label("GitHub 策展")
+                        .selected(!self.pling_mode)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.pling_mode = false;
+                            cx.notify();
+                        })),
+                ),
+        );
+
+        if self.online_busy {
+            return list.child(
+                div()
+                    .p_3()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("网络请求中…"),
+            );
+        }
+
+        if self.pling_mode {
+            // 搜索行（输入框在 render 主流程里创建，这里复用）
+            if let Some(st) = &self.online_search {
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .pb_1()
+                        .child(div().flex_1().child(Input::new(st)))
+                        .child(
+                            Button::new("pling-search")
+                                .small()
+                                .label("搜索")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pling_query = this
+                                        .online_search
+                                        .as_ref()
+                                        .map(|e| e.read(cx).value().to_string());
+                                    this.pling_page = 1;
+                                    this.fetch_pling(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("sort-rating")
+                                .ghost()
+                                .small()
+                                .label("评分")
+                                .selected(self.pling_sort == "highRating")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pling_sort = "highRating";
+                                    this.pling_page = 1;
+                                    this.fetch_pling(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("sort-new")
+                                .ghost()
+                                .small()
+                                .label("最新")
+                                .selected(self.pling_sort == "new")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pling_sort = "new";
+                                    this.pling_page = 1;
+                                    this.fetch_pling(cx);
+                                })),
+                        ),
+                );
+            }
+
+            match &self.pling_items {
+                Some(Err(e)) => {
+                    list = list.child(
+                        div().p_3().text_sm().text_color(errc).child(e.clone()),
+                    );
+                }
+                Some(Ok(page)) => {
+                    let pages = page.total.div_ceil(20).max(1);
+                    list = list.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("GNOME-Look 光标主题 共 {} 个", page.total)),
+                    );
+                    for (k, it) in page.items.iter().enumerate() {
+                        let thumb = it.thumb.clone();
+                        let aname = it.name.clone();
+                        let url = it.download.clone();
+                        let row = div()
+                            .id(SharedString::from(format!("pling-{}-{k}", it.id)))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .mx_2()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(hoverbg))
+                            .child(
+                                div().w(px(56.)).h(px(36.)).overflow_hidden().children(
+                                    (!thumb.is_empty())
+                                        .then(|| img(thumb.clone()).w(px(56.)).h(px(36.))),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(fg)
+                                            .child(it.name.clone()),
+                                    )
+                                    .child(div().text_xs().text_color(muted).child(format!(
+                                        "{} · ★{} · {} 下载",
+                                        it.author, it.score, it.downloads
+                                    ))),
+                            )
+                            .child(if it.page_url.is_empty() {
+                                div().into_any_element()
+                            } else {
+                                let page_url = it.page_url.clone();
+                                Button::new(SharedString::from(format!(
+                                    "pling-open-{}",
+                                    it.id
+                                )))
+                                .ghost()
+                                .small()
+                                .label("↗")
+                                .on_click(move |_, _, _| {
+                                    let _ = std::process::Command::new("xdg-open")
+                                        .arg(page_url.clone())
+                                        .spawn();
+                                })
+                                .into_any_element()
+                            });
+                        list = list.child(row.on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.download_and_install(aname.clone(), url.clone(), cx);
+                            },
+                        )));
+                    }
+                    list = list.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .py_2()
+                            .child(
+                                Button::new("pling-prev")
+                                    .ghost()
+                                    .small()
+                                    .label("‹ 上一页")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if this.pling_page > 1 {
+                                            this.pling_page -= 1;
+                                            this.fetch_pling(cx);
+                                        }
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(format!(
+                                        "{}/{}",
+                                        self.pling_page, pages
+                                    )),
+                            )
+                            .child(
+                                Button::new("pling-next")
+                                    .ghost()
+                                    .small()
+                                    .label("下一页 ›")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let pages =
+                                            this.pling_items.as_ref().map(|r| match r {
+                                                Ok(p) => p.total.div_ceil(20).max(1),
+                                                Err(_) => 1,
+                                            }).unwrap_or(1);
+                                        if this.pling_page < pages {
+                                            this.pling_page += 1;
+                                            this.fetch_pling(cx);
+                                        }
+                                    })),
+                            ),
+                    );
+                }
+                None => {}
+            }
+            return list;
+        }
+
+        // ── GitHub 策展（原两级列表） ──
         if let Some(_sel) = self.online_sel {
             list = list.child(
                 div()
@@ -295,16 +592,6 @@ impl CursorManagerApp {
                         this.online_assets = None;
                         cx.notify();
                     })),
-            );
-        }
-
-        if self.online_busy {
-            return list.child(
-                div()
-                    .p_3()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("网络请求中…"),
             );
         }
 
@@ -346,66 +633,14 @@ impl CursorManagerApp {
                             .hover(move |s| s.bg(hoverbg))
                             .child(label)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.online_busy = true;
-                                this.status = format!("正在下载 {aname} …");
-                                cx.notify();
                                 let url = url.clone();
-                                cx.spawn(async move |this, cx| {
-                                    let res = cx
-                                        .background_executor()
-                                        .spawn(async move {
-                                            let tmp = std::env::temp_dir().join(format!(
-                                                "cm-dl-{}",
-                                                std::process::id()
-                                            ));
-                                            let _ = std::fs::remove_file(&tmp);
-                                            match online::download_to(&url, &tmp) {
-                                                Ok(bytes) => install::install(&tmp)
-                                                    .map(|o| (o, bytes))
-                                                    .map_err(|e| e),
-                                                Err(e) => Err(format!("下载失败: {e}")),
-                                            }
-                                        })
-                                        .await;
-                                    let _ = this.update(cx, |s, cx| {
-                                        s.online_busy = false;
-                                        match res {
-                                            Ok((o, bytes)) => {
-                                                s.status = format!(
-                                                    "已下载 {}KB —— {}",
-                                                    bytes / 1024,
-                                                    o.detail
-                                                );
-                                                s.themes = themes::scan();
-                                                s.row_previews =
-                                                    compute_row_previews(&s.themes);
-                                                if let Some(i) = s
-                                                    .themes
-                                                    .iter()
-                                                    .position(|t| t.id == o.name)
-                                                {
-                                                    s.view_mode = false;
-                                                    s.select_index(i, cx);
-                                                }
-                                            }
-                                            Err(e) => s.status = e,
-                                        }
-                                        cx.notify();
-                                    });
-                                })
-                                .detach();
+                                this.download_and_install(aname.clone(), url, cx);
                             })),
                     );
                 }
             }
             (Some(Err(e)), _) => {
-                list = list.child(
-                    div()
-                        .p_3()
-                        .text_sm()
-                        .text_color(errc)
-                        .child(e.clone()),
-                );
+                list = list.child(div().p_3().text_sm().text_color(errc).child(e.clone()));
             }
             _ => {
                 list = list.child(
@@ -429,12 +664,7 @@ impl CursorManagerApp {
                             .rounded_sm()
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(fg)
-                                    .child(cat.name.to_string()),
-                            )
+                            .child(div().text_sm().text_color(fg).child(cat.name.to_string()))
                             .child(
                                 div()
                                     .text_xs()
@@ -586,9 +816,7 @@ impl Render for CursorManagerApp {
             })
             .collect();
 
-        let search_row: AnyElement = if self.view_mode {
-            div().into_any_element()
-        } else {
+        let search_row: AnyElement = if !self.view_mode {
             let st = self.search.get_or_insert_with(|| {
                 cx.new(|cx| InputState::new(window, cx).placeholder("搜索主题…"))
             });
@@ -598,6 +826,18 @@ impl Render for CursorManagerApp {
                 .w_full()
                 .child(Input::new(st))
                 .into_any_element()
+        } else if self.pling_mode {
+            let st = self.online_search.get_or_insert_with(|| {
+                cx.new(|cx| InputState::new(window, cx).placeholder("搜索 GNOME-Look 光标…"))
+            });
+            div()
+                .px_2()
+                .pb_1()
+                .w_full()
+                .child(Input::new(st))
+                .into_any_element()
+        } else {
+            div().into_any_element()
         };
         let _ = &border;
 
@@ -654,6 +894,12 @@ impl Render for CursorManagerApp {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.view_mode = true;
                                         this.pending_uninstall = false;
+                                        if this.pling_items.is_none()
+                                            && !this.online_busy
+                                            && this.pling_mode
+                                        {
+                                            this.fetch_pling(cx);
+                                        }
                                         cx.notify();
                                     })),
                             ),
