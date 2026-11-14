@@ -1480,6 +1480,7 @@ impl Render for CursorManagerApp {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap_2()
                             .child(uninstall_btn)
@@ -1499,7 +1500,7 @@ impl Render for CursorManagerApp {
                         Button::new("undo")
                             .ghost()
                             .small()
-                            .label(format!("撤销到 {}", self.history[1]))
+                            .label("撤销")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if this.history.len() < 2 {
                                     return;
