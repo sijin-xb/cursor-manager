@@ -1232,133 +1232,6 @@ impl Render for CursorManagerApp {
                         b
                     }))
                     .child(
-                        div()
-                            .w_full()
-                            .h(px(30.))
-                            .id("wavy-track")
-                            .relative()
-                            .child({
-                                let tb = self.wavy_bounds.clone();
-                                let weak = cx.weak_entity();
-                                let accent = accent;
-                                let border = border;
-                                canvas(
-                                    {
-                                        // prepaint：捕获轨道几何（供覆盖层算 frac）
-                                        let tb = tb.clone();
-                                        move |bounds, _, _| {
-                                            tb.set(Some(bounds));
-                                            bounds
-                                        }
-                                    },
-                                    {
-                                        // paint：画 M3 波浪轨道 + thumb
-                                        let weak = weak.clone();
-                                        move |bounds, _, window, cx| {
-                                            let Some(ent) = weak.upgrade() else { return };
-                                            let app = ent.read(cx);
-                                            let frac =
-                                                ((app.size as f32 - 8.0) / 120.0)
-                                                    .clamp(0.0, 1.0);
-                                            let amp = app.wavy_amp;
-                                            let mid =
-                                                bounds.origin.y + bounds.size.height / 2.0;
-                                            let thumb_x =
-                                                bounds.left() + bounds.size.width * frac;
-                                            let seg = |window: &mut gpui_kit::Window,
-                                                       from: Pixels,
-                                                       to: Pixels,
-                                                       color: gpui_kit::Hsla| {
-                                                let mut pb = PathBuilder::stroke(px(3.0));
-                                                let w = f32::from(to - from);
-                                                let steps =
-                                                    ((w / 3.0).ceil() as usize).max(2);
-                                                for k in 0..=steps {
-                                                    let t = k as f32 / steps as f32;
-                                                    let x = f32::from(from) + w * t;
-                                                    let y = f32::from(mid)
-                                                        + amp * (x / 9.0).sin();
-                                                    let pt = point(px(x), px(y));
-                                                    if k == 0 {
-                                                        pb.move_to(pt);
-                                                    } else {
-                                                        pb.line_to(pt);
-                                                    }
-                                                }
-                                                if let Ok(path) = pb.build() {
-                                                    window.paint_path(path, color);
-                                                }
-                                            };
-                                            seg(window, bounds.left(), thumb_x, fg);
-                                            seg(window, thumb_x, bounds.right(), muted);
-                                            let tbq = Bounds::new(
-                                                point(thumb_x - px(5.5), mid - px(5.5)),
-                                                size(px(11.), px(11.)),
-                                            );
-                                            let mut q = fill(tbq, fg);
-                                            q.corner_radii = px(5.5).into();
-                                            window.paint_quad(q);
-                                        }
-                                    },
-                                )
-                            })
-                            .child({
-                                // 交互覆盖层：元素级鼠标处理器（按钮同款机制）
-                                let drag = self.wavy_drag.clone();
-                                let tb = self.wavy_bounds.clone();
-                                let weak = cx.weak_entity();
-                                let frac_of = |b: Bounds<Pixels>, x: Pixels| -> f32 {
-                                    ((x - b.left()).max(px(0.0)) / b.size.width)
-                                        .clamp(0.0, 1.0)
-                                };
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .cursor_pointer()
-                                    .on_mouse_down(MouseButton::Left, {
-                                        let drag = drag.clone();
-                                        let tb = tb.clone();
-                                        let weak = weak.clone();
-                                        move |ev: &MouseDownEvent, _, cx| {
-                                            drag.set(true);
-                                            if let Some(b) = tb.get() {
-                                                let f = frac_of(b, ev.position.x);
-                                                let _ = weak.update(cx, |s, cx| {
-                                                    s.set_wavy_frac(f, cx)
-                                                });
-                                            }
-                                        }
-                                    })
-                                    .on_mouse_move({
-                                        let drag = drag.clone();
-                                        let tb = tb.clone();
-                                        let weak = weak.clone();
-                                        move |ev: &MouseMoveEvent, _, cx| {
-                                            if drag.get() {
-                                                if let Some(b) = tb.get() {
-                                                    let f = frac_of(b, ev.position.x);
-                                                    let _ = weak.update(cx, |s, cx| {
-                                                        s.set_wavy_frac(f, cx)
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    })
-                                    .on_mouse_up(MouseButton::Left, {
-                                        let drag = drag.clone();
-                                        let weak = weak.clone();
-                                        move |_ev: &MouseUpEvent, _, cx| {
-                                            if drag.get() {
-                                                drag.set(false);
-                                                let _ = weak.update(cx, |s, cx| {
-                                                    s.release_wavy(cx)
-                                                });
-                                            }
-                                        }
-                                    })
-                            })
-                    )
-                        .child(
                             div()
                                 .text_sm()
                                 .text_color(muted)
@@ -1379,14 +1252,13 @@ impl Render for CursorManagerApp {
                     .child(
                         div()
                             .w_full()
+                            .max_w(px(520.))
                             .h(px(30.))
                             .id("wavy-track")
                             .relative()
                             .child({
                                 let tb = self.wavy_bounds.clone();
                                 let weak = cx.weak_entity();
-                                let accent = accent;
-                                let border = border;
                                 canvas(
                                     {
                                         let tb = tb.clone();
