@@ -19,6 +19,7 @@ use gpui_kit::RenderImage;
 use gpui_kit::assets::Assets;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::{ActiveTheme, Selectable, Sizable, Theme, ThemeMode, label::Label};
 
 actions!(cursor_manager, [SelUp, SelDown, ApplySel, DelSel]);
@@ -75,6 +76,8 @@ struct CursorManagerApp {
     pending_uninstall: bool,
     /// 本地列表排序：false = 名称，true = 修改时间（新→旧）
     sort_by_time: bool,
+    /// 自定义尺寸滑杆（8–128，预设外任意值）
+    size_slider: Option<Entity<SliderState>>,
     /// false = 本地列表，true = 在线目录
     view_mode: bool,
     search: Option<Entity<InputState>>,
@@ -122,6 +125,7 @@ impl CursorManagerApp {
             status: "就绪 —— 左侧选择主题，右下应用".into(),
             pending_uninstall: false,
             sort_by_time: false,
+            size_slider: None,
             view_mode: false,
             search: None,
             online_assets: None,
@@ -229,6 +233,39 @@ impl CursorManagerApp {
             })
             .unwrap_or_default();
         self.preview_key = Some(key);
+    }
+
+    /// 创建尺寸滑杆并订阅事件（需要 window 才能设初值）
+    fn init_slider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let e = cx.new(|_| SliderState::new().min(8.).max(128.));
+        e.update(cx, |st, c| {
+            st.set_value(SliderValue::Single(self.size as f32), window, c);
+        });
+        cx.subscribe(&e, |this, _, evt: &SliderEvent, cx| {
+            this.on_slider_event(evt, cx);
+        })
+        .detach();
+        self.size_slider = Some(e);
+    }
+
+    fn on_slider_event(&mut self, event: &SliderEvent, cx: &mut Context<Self>) {
+        let v = match event {
+            SliderEvent::Change(v) | SliderEvent::Release(v) => v,
+        };
+        let f = match v {
+            SliderValue::Single(f) => *f,
+            SliderValue::Range(a, _) => *a,
+        };
+        let n = f.round().clamp(8.0, 128.0) as u32;
+        if n != self.size {
+            self.size = n;
+            // 拖动中只更新数值；松手才重解码预览
+            if matches!(event, SliderEvent::Release(_)) {
+                self.preview_key = None;
+                self.refresh_previews();
+            }
+            cx.notify();
+        }
     }
 
     /// 统一的选中入口：行点击 / 键盘导航都走这里
@@ -1187,17 +1224,45 @@ impl Render for CursorManagerApp {
                         let mut b = Button::new(SharedString::from(format!("size-{s}")))
                             .small()
                             .label(format!("{s}"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.size = s;
+                                if let Some(e) = &this.size_slider {
+                                    e.update(cx, |st, c| {
+                                        st.set_value(
+                                            SliderValue::Single(s as f32),
+                                            window,
+                                            c,
+                                        );
+                                    });
+                                }
                                 this.preview_key = None;
                                 this.refresh_previews();
                                 cx.notify();
                             }));
                         if self.size == s {
                             b = b.selected(true);
+                        } else {
+                            // 从滑杆拖回某个预设时同步选中态
                         }
                         b
                     }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(90.))
+                            .max_w(px(180.))
+                            .children(
+                                self.size_slider
+                                    .as_ref()
+                                    .map(|st| Slider::new(st).into_any_element()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(format!("{}px", self.size)),
+                    )
                     .child(div().flex_1())
                     .child(
                         Button::new("hotspot")
@@ -1548,9 +1613,12 @@ fn main() {
             app_id: Some("cursor-manager".into()),
             ..Default::default()
         };
-        let (_, view) =
-            gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| CursorManagerApp::new()))
-                .expect("打开窗口失败");
+        let (_, view) = gpui_kit::open_window(options, cx, |window, cx| {
+            let app = cx.new(|_| CursorManagerApp::new());
+            app.update(cx, |v, cx| v.init_slider(window, cx));
+            app
+        })
+        .expect("打开窗口失败");
         view.update(cx, |v, cx| v.start_anim(cx));
         cx.activate(true);
     });
