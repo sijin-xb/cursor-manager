@@ -874,6 +874,18 @@ impl Render for CursorManagerApp {
         };
         let _ = &border;
 
+        let count_row: AnyElement = if !self.view_mode {
+            div()
+                .px_3()
+                .pb_1()
+                .text_xs()
+                .text_color(muted)
+                .child(format!("已安装主题（{}）", self.themes.len()))
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
         let list_body: AnyElement = if self.view_mode {
             self.render_online(cx).into_any_element()
         } else {
@@ -1008,6 +1020,7 @@ impl Render for CursorManagerApp {
                     ),
             )
             .child(search_row)
+            .child(count_row)
             .child(list_body);
 
         // ── 右侧内容 ──
